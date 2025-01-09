@@ -13,6 +13,7 @@ const rateLimiter = new RateLimiter(RATE_LIMIT);
 
 async function fetchWithScrapingBee(
   url: string,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   retryCount = 0
 ): Promise<string> {
   const apiUrl = `https://app.scrapingbee.com/api/v1`;
@@ -22,7 +23,7 @@ async function fetchWithScrapingBee(
     render_js: "true",
     premium_proxy: "true",
     block_ads: "true",
-    wait: "5000", // Wait for JavaScript to load
+    wait: "5000",
     timeout: "20000",
   };
 
@@ -187,14 +188,6 @@ async function getLinkedInUrl(companyName: string): Promise<string> {
   }
 }
 
-interface ScrapedCompany {
-  name: string;
-  website?: string;
-  linkedin_url?: string;
-  source: string;
-  batch?: string;
-}
-
 function validateCompany(company: Partial<Startup>): boolean {
   if (!company.name || company.name.trim().length < 2) {
     console.log("Validation failed: Invalid name");
@@ -333,4 +326,9 @@ async function scrapeYCombinator(): Promise<Partial<Startup>[]> {
 
   console.log(`Total YC companies scraped: ${startups.length}`);
   return startups;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+interface ScrapedCompany {
+  // ...
 }
