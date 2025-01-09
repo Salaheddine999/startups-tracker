@@ -327,8 +327,3 @@ async function scrapeYCombinator(): Promise<Partial<Startup>[]> {
   console.log(`Total YC companies scraped: ${startups.length}`);
   return startups;
 }
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-interface ScrapedCompany {
-  // ...
-}
