@@ -1,62 +1,189 @@
-import axios, { AxiosRequestConfig, AxiosResponse } from "axios";
+import axios from "axios";
 import * as cheerio from "cheerio";
 import { Startup } from "@/types";
 import { RateLimiter } from "@/lib/utils/rate-limiter";
 
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
+const SCRAPING_BEE_API_KEY = process.env.SCRAPING_BEE_API_KEY;
+if (!SCRAPING_BEE_API_KEY) {
+  throw new Error("Missing SCRAPING_BEE_API_KEY environment variable");
+}
 
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const YC_BATCHES = ["W24"]; // Current year batches
-
-const MAX_RETRIES = 3;
-const RATE_LIMIT = 1; // requests per second
+const RATE_LIMIT = 0.5; // One request every 2 seconds
 const rateLimiter = new RateLimiter(RATE_LIMIT);
 
-async function fetchWithRetry(
+async function fetchWithScrapingBee(
   url: string,
-  options: AxiosRequestConfig,
-  retries = MAX_RETRIES
-): Promise<AxiosResponse> {
+  retryCount = 0
+): Promise<string> {
+  const apiUrl = `https://app.scrapingbee.com/api/v1`;
+  const params = {
+    api_key: SCRAPING_BEE_API_KEY,
+    url: url,
+    render_js: "true",
+    premium_proxy: "true",
+    block_ads: "true",
+    wait: "5000", // Wait for JavaScript to load
+    timeout: "20000",
+  };
+
   try {
-    return await rateLimiter.add(() => axios.get(url, options));
+    const response = await rateLimiter.add(() =>
+      axios.get(apiUrl, {
+        params,
+        responseType: "text",
+      })
+    );
+    return response.data;
   } catch (error) {
-    if (
-      retries > 0 &&
-      axios.isAxiosError(error) &&
-      error.response?.status === 429
-    ) {
-      console.log(`Rate limited, retrying... (${retries} attempts left)`);
-      await delay(2000); // Wait longer between retries
-      return fetchWithRetry(url, options, retries - 1);
+    console.error("ScrapingBee error:", error);
+    throw error;
+  }
+}
+
+async function scrapeA16z(): Promise<Partial<Startup>[]> {
+  const startups: Partial<Startup>[] = [];
+  const processedNames = new Set<string>();
+
+  try {
+    console.log("Fetching A16Z portfolio...");
+
+    const html = await fetchWithScrapingBee("https://a16z.com/portfolio/");
+    console.log("Got portfolio page HTML, length:", html.length);
+
+    const $ = cheerio.load(html);
+
+    // Enhanced selectors for company detection
+    const selectors = [
+      // Original selectors
+      ".company-grid-item",
+      "[data-filter-by]",
+      // Data attribute selectors
+      "[data-name]",
+      "[data-secondary-name]",
+      "[data-id]",
+      // Class-based selectors
+      ".column.grid-item",
+      ".builder",
+      ".portfolio-company",
+      // Specific A16Z selectors
+      "[data-v-7c2c5638].column",
+      "[data-v-7c2c5638].builder",
+      // Nested structure selectors
+      ".builder-logo",
+      ".builder-title",
+      // Additional backup selectors
+      ".portfolio-grid > div",
+      ".company-list-item",
+      ".startup-item",
+    ];
+
+    // Find all portfolio companies using multiple selectors
+    const portfolioItems = $(selectors.join(", ")).toArray();
+    console.log(`Found ${portfolioItems.length} total portfolio items`);
+
+    for (const item of portfolioItems) {
+      const element = $(item);
+
+      // Enhanced company data extraction
+      const companyData = {
+        filterBy: element.attr("data-filter-by") || "",
+        investmentDate: element.attr("data-investment-date") || "",
+        name: (
+          element.attr("data-name") ||
+          element.attr("data-secondary-name") ||
+          element.find(".builder-title span").text() ||
+          element.find("h3").text() ||
+          element.find(".company-name").text() ||
+          ""
+        ).trim(),
+        website: (
+          element.find("a").attr("href") ||
+          element.attr("data-website") ||
+          element.find(".website-link").attr("href") ||
+          "not found"
+        ).trim(),
+      };
+
+      // Check if investment was made in Q4 2024
+      const isQ4_2024 =
+        companyData.filterBy.includes("2024") &&
+        (companyData.investmentDate.includes("Q4 2024") ||
+          companyData.investmentDate.includes("October 2024") ||
+          companyData.investmentDate.includes("November 2024") ||
+          companyData.investmentDate.includes("December 2024") ||
+          /2024-(10|11|12)/.test(companyData.investmentDate));
+
+      if (!isQ4_2024) {
+        console.log(`Skipping ${companyData.name}: Not a Q4 2024 investment`);
+        continue;
+      }
+
+      // Skip exits
+      if (companyData.filterBy.toLowerCase().includes("exit")) {
+        console.log(`Skipping ${companyData.name}: Is an exit`);
+        continue;
+      }
+
+      if (!companyData.name) {
+        console.log("Skipping: No company name found");
+        continue;
+      }
+
+      if (processedNames.has(companyData.name.toLowerCase())) {
+        console.log(`Skipping ${companyData.name}: Already processed`);
+        continue;
+      }
+
+      const startup: Partial<Startup> = {
+        name: companyData.name,
+        website:
+          companyData.website !== "not found"
+            ? companyData.website
+            : "not found",
+        linkedin_url: await getLinkedInUrl(companyData.name),
+      };
+
+      if (validateCompany(startup)) {
+        startups.push(startup);
+        processedNames.add(companyData.name.toLowerCase());
+        console.log(`Successfully added Q4 2024 company: ${companyData.name}`);
+      }
     }
+
+    console.log(`Found ${startups.length} Q4 2024 A16Z investments`);
+    return startups;
+  } catch (error) {
+    console.error("Error scraping A16Z investments:", error);
     throw error;
   }
 }
 
 async function getLinkedInUrl(companyName: string): Promise<string> {
   try {
-    const response = await fetchWithRetry(
-      `https://www.google.com/search?q=${encodeURIComponent(
-        companyName + " LinkedIn company page"
-      )}`,
-      {
-        headers: {
-          "User-Agent": USER_AGENT,
-          Accept: "text/html",
-          "Accept-Language": "en-US,en;q=0.9",
-          Referer: "https://www.google.com/",
-        },
-      }
-    );
+    // First try direct LinkedIn search
+    const linkedInSearchUrl = `https://www.linkedin.com/company/${encodeURIComponent(
+      companyName.toLowerCase().replace(/[^a-z0-9]/g, "-")
+    )}`;
 
-    const $ = cheerio.load(response.data);
+    return linkedInSearchUrl; // Return the constructed URL without verification
+
+    // Commenting out Google search approach due to rate limits
+    /*
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(
+      companyName + " LinkedIn company page"
+    )}`;
+
+    const html = await fetchWithScrapingBee(searchUrl);
+    const $ = cheerio.load(html);
     const linkedInLink = $('a[href*="linkedin.com/company/"]').first();
-    return linkedInLink.attr("href") || "";
+    return linkedInLink.attr("href") || linkedInSearchUrl;
+    */
   } catch (error) {
     console.error(`Error finding LinkedIn URL for ${companyName}:`, error);
-    return "";
+    // Return a constructed LinkedIn URL instead of empty string
+    return `https://www.linkedin.com/company/${encodeURIComponent(
+      companyName.toLowerCase().replace(/[^a-z0-9]/g, "-")
+    )}`;
   }
 }
 
@@ -69,109 +196,13 @@ interface ScrapedCompany {
 }
 
 function validateCompany(company: Partial<Startup>): boolean {
-  if (!company.name || company.name.trim().length < 2) return false;
-  // Remove website validation since some companies might be stealth
-  // if (company.website && !company.website.startsWith("http")) return false;
-  // Remove LinkedIn validation since some companies might not have LinkedIn yet
-  // if (company.linkedin_url && !company.linkedin_url.includes("linkedin.com")) return false;
+  if (!company.name || company.name.trim().length < 2) {
+    console.log("Validation failed: Invalid name");
+    return false;
+  }
+
+  // Add any company that has a name
   return true;
-}
-
-async function scrapeA16z(): Promise<Partial<Startup>[]> {
-  const startups: ScrapedCompany[] = [];
-  const processedNames = new Set<string>();
-
-  // List of URLs to try
-  const urls = ["https://a16z.com/portfolio/"];
-
-  for (const url of urls) {
-    try {
-      console.log(`Trying A16Z URL: ${url}`);
-      const response = await fetchWithRetry(url, {
-        headers: {
-          "User-Agent": USER_AGENT,
-          Accept:
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-        },
-      });
-
-      console.log(`Got response from ${url}, status:`, response.status);
-      const $ = cheerio.load(response.data);
-
-      // Try different selectors for company elements
-      const selectors = [
-        ".company-grid-item",
-        ".builder",
-        "[data-v-7c2c5638].builder",
-        "[data-filter-by]",
-        "[data-name]",
-        ".portfolio-company",
-        ".portfolio-grid > div",
-      ];
-
-      for (const selector of selectors) {
-        const items = $(selector).toArray();
-        console.log(`Found ${items.length} items with selector: ${selector}`);
-
-        if (items.length > 0) {
-          console.log(`Using selector: ${selector}`);
-
-          for (const item of items) {
-            try {
-              const element = $(item);
-              let name =
-                element.attr("data-name") || // Try data attribute first
-                element.find(".builder-title span").text().trim() || // Try builder title
-                element.find("h1,h2,h3,h4,h5,h6").first().text().trim(); // Try headings
-
-              // Clean up the name
-              if (name) {
-                name = name.replace(/IPO:|Acquired By:/i, "").trim();
-                console.log("Found company name:", name);
-
-                if (!processedNames.has(name.toLowerCase())) {
-                  const companyData: ScrapedCompany = {
-                    name,
-                    website: "not found", // We'll get this from LinkedIn
-                    linkedin_url: await getLinkedInUrl(name),
-                    source: "a16z",
-                  };
-
-                  if (validateCompany(companyData)) {
-                    startups.push(companyData);
-                    processedNames.add(name.toLowerCase());
-                    console.log(`Successfully added ${name} to results`);
-                  }
-                }
-              }
-            } catch (error) {
-              console.error("Error processing company element:", error);
-            }
-          }
-
-          // If we found and processed companies with this selector, break the selector loop
-          if (startups.length > 0) {
-            break;
-          }
-        }
-      }
-
-      // If we found companies from this URL, break the URL loop
-      if (startups.length > 0) {
-        break;
-      }
-    } catch (error) {
-      console.error(`Failed to fetch ${url}:`, error);
-      // Continue to next URL
-    }
-  }
-
-  if (startups.length === 0) {
-    console.error("Failed to find any companies across all attempted URLs");
-  }
-
-  return startups;
 }
 
 function handleScrapingError(source: string, error: unknown) {
@@ -196,11 +227,12 @@ export async function scrapeStartups(): Promise<Partial<Startup>[]> {
   const stats = {
     total: 0,
     a16z: 0,
-    yc: 0,
+    yc: 0, // Uncommented YC stats
     errors: 0,
   };
 
   try {
+    // Parallel scraping of both sources
     const [a16zStartups, ycStartups] = await Promise.all([
       scrapeA16z(),
       scrapeYCombinator(),
@@ -221,12 +253,14 @@ export async function scrapeStartups(): Promise<Partial<Startup>[]> {
   }
 }
 
+// Uncomment and update YC scraper
 async function scrapeYCombinator(): Promise<Partial<Startup>[]> {
   const startups: Partial<Startup>[] = [];
   const processedNames = new Set<string>();
+  const YC_BATCHES = ["W24"];
 
   for (const batch of YC_BATCHES) {
-    let page = 0;
+    let page = 0; // Start from page 0
     let hasMore = true;
     let consecutiveErrors = 0;
     const MAX_CONSECUTIVE_ERRORS = 3;
@@ -235,19 +269,12 @@ async function scrapeYCombinator(): Promise<Partial<Startup>[]> {
       while (hasMore && consecutiveErrors < MAX_CONSECUTIVE_ERRORS) {
         console.log(`Fetching YC ${batch} batch, page ${page}...`);
         try {
-          const response = await fetchWithRetry(
-            `https://api.ycombinator.com/v0.1/companies?batch=${batch}&page=${page}&count=100`,
-            {
-              headers: {
-                "User-Agent": USER_AGENT,
-                Accept: "application/json",
-                Origin: "https://www.ycombinator.com",
-                Referer: "https://www.ycombinator.com/companies",
-              },
-            }
+          const response = await fetchWithScrapingBee(
+            `https://api.ycombinator.com/v0.1/companies?batch=${batch}&page=${page}&count=100`
           );
 
-          const companies = response.data.companies || [];
+          const data = JSON.parse(response);
+          const companies = data.companies || [];
           console.log(`Found ${companies.length} YC companies on page ${page}`);
 
           if (companies.length === 0) {
@@ -261,14 +288,12 @@ async function scrapeYCombinator(): Promise<Partial<Startup>[]> {
               !processedNames.has(company.name.toLowerCase())
             ) {
               try {
-                await delay(1000); // Rate limit LinkedIn requests
-                const linkedin_url = await getLinkedInUrl(company.name);
+                await rateLimiter.add(() => Promise.resolve());
 
                 const startup: Partial<Startup> = {
                   name: company.name,
                   website: company.website || "not found",
-                  linkedin_url: linkedin_url || "not found",
-                  source: `YC ${batch}`,
+                  linkedin_url: await getLinkedInUrl(company.name),
                 };
 
                 if (validateCompany(startup)) {
@@ -277,8 +302,6 @@ async function scrapeYCombinator(): Promise<Partial<Startup>[]> {
                   console.log(
                     `Added YC company: ${company.name} (${startups.length} total)`
                   );
-                } else {
-                  console.log(`Skipped invalid company: ${company.name}`);
                 }
               } catch (error) {
                 console.error(
@@ -290,17 +313,17 @@ async function scrapeYCombinator(): Promise<Partial<Startup>[]> {
             }
           }
 
-          consecutiveErrors = 0; // Reset error counter on success
+          consecutiveErrors = 0;
           page++;
 
-          // Check if we have more pages
-          hasMore = response.data.next || response.data.nextPage;
+          // Check if we have more pages using the API's next page indicator
+          hasMore = data.next || data.nextPage;
 
-          await delay(1000); // Rate limit between pages
+          await rateLimiter.add(() => Promise.resolve());
         } catch (error) {
           console.error(`Error fetching page ${page}:`, error);
           consecutiveErrors++;
-          await delay(5000); // Wait longer after an error
+          await new Promise((resolve) => setTimeout(resolve, 5000));
         }
       }
     } catch (error) {

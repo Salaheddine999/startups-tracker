@@ -15,7 +15,6 @@ export async function GET() {
         name: startup.name || "Unknown",
         website: startup.website || "not found",
         linkedin_url: startup.linkedin_url || "not found",
-        source: startup.source,
         created_at: new Date().toISOString(),
       }));
 

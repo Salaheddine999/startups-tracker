@@ -40,10 +40,6 @@ const columns: ColumnDef<Startup>[] = [
       </a>
     ),
   },
-  {
-    accessorKey: "source",
-    header: "Source",
-  },
 ];
 
 export function StartupTable({ data }: { data: Startup[] }) {
