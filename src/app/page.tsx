@@ -63,7 +63,7 @@ export default function Home() {
             <StartupCount />
           </div>
           <p className="text-gray-600 mt-2">
-            Tracking A16Z portfolio and YC 2024 batch startups
+            Tracking A16Z Q4 2024 and YC W24 batch startups
           </p>
         </div>
         <Button
